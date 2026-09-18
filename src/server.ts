@@ -3,7 +3,7 @@ import { extractTextFromPdf } from './utils/pdfExtractor';
 import { CoordinateParser } from './utils/coordinateParser';
 import { extractBatchWithLLM } from './utils/llmParser';
 import { DatabaseService } from './services/api';
-import { alert } from './utils/alert';
+import { alert, sendHighRiskDigest } from './utils/alert';
 import { CONFIG } from './config';
 
 async function sleep(ms: number): Promise<void> {
@@ -170,6 +170,17 @@ async function runPipeline() {
 
     // Mark missing as cancelled
     await db.markMissingAsCancelled(warnings.map((w) => w.warningId));
+
+    // Alert on newly processed HIGH risk warnings
+    const newHighRisk = ready
+      .filter((r) => !existing.has(r.warning_id) && r.risk_level === 'HIGH')
+      .map((r) => ({
+        warning_id: r.warning_id,
+        risk_level: r.risk_level,
+        title: r.title ?? r.warning_id,
+        snippet: (r.raw_text ?? '').replace(/\s+/g, ' ').trim().slice(0, 300),
+      }));
+    await sendHighRiskDigest(newHighRisk);
 
     // Alert on failures
     const failed = ready.filter((r) => r.extraction_method === 'failed').length;

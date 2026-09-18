@@ -6,3 +6,5 @@ node_modules/
 recon/
 dist/
 *.js.map
+.agents/
+skills-lock.json

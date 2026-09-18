@@ -1,22 +1,5 @@
 import { createHash } from 'crypto';
-
-export interface Geometry {
-  type: 'point' | 'polygon' | 'line' | 'circle';
-  coords: Array<{ lat: number; lon: number }>;
-  radius_nm?: number;
-  spatial_group_id?: string;
-}
-
-export interface ParsedCoordinates {
-  geometries: Geometry[];
-  risk_level: 'NORMAL' | 'REVIEW' | 'HIGH';
-  extraction_method: 'deterministic';
-  confidence_score: number;
-  evidence_trail: Array<{ rule: string; match: string }>;
-  is_cancelled: boolean;
-  cancellation_text: string | null;
-  valid_until_utc: Date | null;
-}
+import { Geometry, ParsedCoordinates } from '../types';
 
 // NAVAREA VIII approximate bounds
 const NAVAREA_BOUNDS = { latMin: -10, latMax: 30, lonMin: 30, lonMax: 100 };
@@ -25,10 +8,10 @@ const COORD_PATTERNS = [
   // Hyphenated Deg-Min: 12-34.5N 074-12.3E
   {
     name: 'hyphenated-deg-min',
-    regex: /(\d{1,2})-(\d{1,2}(?:\.\d+)?)\s*([NS])\s+(\d{1,3})-(\d{1,2}(?:\.\d+)?)\s*([EW])/gi,
+    regex: /(\d{1,2})-\s*(\d{1,2}(?:\.\d+)?)\s*([NS])\s+(\d{1,3})-\s*(\d{1,2}(?:\.\d+)?)\s*([EW])/gi,
     parse: (m: RegExpMatchArray) => ({
-      lat: (m[1] !== '0' ? parseFloat(m[1]) : 0) + parseFloat(m[2]) / 60 * (m[3].toUpperCase() === 'S' ? -1 : 1),
-      lon: (m[4] !== '0' ? parseFloat(m[4]) : 0) + parseFloat(m[5]) / 60 * (m[6].toUpperCase() === 'W' ? -1 : 1),
+      lat: ((m[1] !== '0' ? parseFloat(m[1]) : 0) + parseFloat(m[2]) / 60) * (m[3].toUpperCase() === 'S' ? -1 : 1),
+      lon: ((m[4] !== '0' ? parseFloat(m[4]) : 0) + parseFloat(m[5]) / 60) * (m[6].toUpperCase() === 'W' ? -1 : 1),
     }),
   },
   // Space-separated Deg-Min: 12 34.5N 074 12.3E
@@ -36,8 +19,8 @@ const COORD_PATTERNS = [
     name: 'space-deg-min',
     regex: /(\d{1,2})\s+(\d{1,2}(?:\.\d+)?)\s*([NS])\s+(\d{1,3})\s+(\d{1,2}(?:\.\d+)?)\s*([EW])/gi,
     parse: (m: RegExpMatchArray) => ({
-      lat: parseFloat(m[1]) + parseFloat(m[2]) / 60 * (m[3].toUpperCase() === 'S' ? -1 : 1),
-      lon: parseFloat(m[4]) + parseFloat(m[5]) / 60 * (m[6].toUpperCase() === 'W' ? -1 : 1),
+      lat: (parseFloat(m[1]) + parseFloat(m[2]) / 60) * (m[3].toUpperCase() === 'S' ? -1 : 1),
+      lon: (parseFloat(m[4]) + parseFloat(m[5]) / 60) * (m[6].toUpperCase() === 'W' ? -1 : 1),
     }),
   },
   // Concatenated Deg-Min: 1234.5N 07412.3E

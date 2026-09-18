@@ -13,9 +13,8 @@ async function main(): Promise<void> {
     fail(`missing env var(s): ${missing.join(', ')}. Set them before running.`);
   }
 
-  const { CONFIG } = await import('./config.js');
   const execute = process.argv.includes('--execute');
-  const client = createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_KEY);
+  const client = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_KEY!);
 
   const { data, error } = await client.rpc('archive_old_hydrobharat_warnings', {
     p_days: DAYS,
@@ -33,7 +32,7 @@ async function main(): Promise<void> {
   const { data: candidates, error: listError } = await client
     .from('nav_warnings')
     .select('warning_id, last_seen_at')
-    .eq('source_id', CONFIG.SOURCE_ID)
+    .eq('source_id', 'hydrobharat-gov-in')
     .lt('last_seen_at', cutoff)
     .order('last_seen_at')
     .limit(20);

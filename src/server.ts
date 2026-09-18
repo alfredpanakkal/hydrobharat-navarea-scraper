@@ -44,13 +44,15 @@ async function runPipeline() {
       );
     }
 
-    // Extract warning_id from document title
-    const warnings = documents.map((doc) => {
-      // Extract warning ID from title like "Inforce_Navarea Warn_mu6wnrsl9.pdf"
-      const match = doc.title.match(/Warn[_ ]([a-z0-9]+)/i);
-      const warningId = match ? match[1] : `doc-${doc.id}`;
-      return { ...doc, warningId };
-    });
+    // Extract warning_id from document title, skip non-PDFs
+    const warnings = documents
+      .filter((doc) => doc.title.toLowerCase().endsWith('.pdf'))
+      .map((doc) => {
+        const match = doc.title.match(/Warn[_ ]([a-z0-9]+)/i);
+        const warningId = match ? match[1] : `doc-${doc.id}`;
+        return { ...doc, warningId };
+      });
+    console.log(`[Pipeline] ${warnings.length} PDF documents to process`);
 
     // Fetch existing state in one query
     const existing = await db.getExisting(warnings.map((w) => w.warningId));
@@ -157,10 +159,13 @@ async function runPipeline() {
       await sleep(2000);
     }
 
-    // Upsert all ready rows
-    for (const row of ready) {
-      await db.upsertWarning(row, existing.get(row.warning_id));
-      upserted++;
+    // Batch upsert all ready rows
+    const BATCH_SIZE = 50;
+    for (let i = 0; i < ready.length; i += BATCH_SIZE) {
+      const batch = ready.slice(i, i + BATCH_SIZE);
+      console.log(`[Pipeline] Upserting batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(ready.length / BATCH_SIZE)}`);
+      await db.upsertWarningBatch(batch, existing);
+      upserted += batch.length;
     }
 
     // Mark missing as cancelled

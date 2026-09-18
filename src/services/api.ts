@@ -96,6 +96,59 @@ export class DatabaseService {
     }
   }
 
+  async upsertWarningBatch(rows: UpsertData[], existing: Map<string, ExistingRow>): Promise<void> {
+    if (rows.length === 0) return;
+
+    const now = new Date().toISOString();
+    const records = rows.map((data) => {
+      const prev = existing.get(data.warning_id);
+      const revision = prev ? prev.revision + 1 : 1;
+      return {
+        warning_id: data.warning_id,
+        source_id: CONFIG.SOURCE_ID,
+        title: data.title,
+        raw_text: data.raw_text,
+        checksum: data.checksum,
+        revision,
+        previous_checksum: prev?.checksum ?? null,
+        spatial: data.geometries ?? [],
+        spatial_groups: data.spatial_groups ?? [],
+        evidence_trail: data.evidence_trail ?? [],
+        extraction_method: data.extraction_method,
+        risk_level: data.risk_level ?? 'NORMAL',
+        is_cancelled: data.is_cancelled ?? false,
+        cancellation_text: data.cancellation_text,
+        valid_until_utc: data.valid_until_utc,
+        last_seen_at: now,
+        updated_at: now,
+      };
+    });
+
+    const { error } = await this.client
+      .from('nav_warnings')
+      .upsert(records, { onConflict: 'source_id,warning_id' });
+
+    if (error) throw new Error(`upsertWarningBatch failed: ${error.message}`);
+
+    // Archive amended versions
+    const amended = rows.filter((data) => {
+      const prev = existing.get(data.warning_id);
+      return prev && prev.checksum !== data.checksum;
+    });
+    if (amended.length > 0) {
+      const archives = amended.map((data) => {
+        const prev = existing.get(data.warning_id)!;
+        return {
+          warning_id: data.warning_id,
+          source_id: CONFIG.SOURCE_ID,
+          full_raw_text: data.raw_text,
+          checksum_sha256: prev.checksum,
+        };
+      });
+      await this.client.from('raw_messages').insert(archives);
+    }
+  }
+
   async touch(warningId: string): Promise<void> {
     const { error } = await this.client
       .from('nav_warnings')

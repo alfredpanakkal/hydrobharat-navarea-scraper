@@ -1,0 +1,28 @@
+{
+  "name": "navarea-webscraper-hydrobarathi",
+  "version": "1.0.0",
+  "description": "NAVAREA VIII warning scraper using Liferay API + PDF parsing",
+  "main": "dist/server.js",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "recon": "tsx src/recon.ts",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "@mistralai/mistralai": "^1.0.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "pdf-parse": "^2.4.5",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.23.13",
+    "typescript": "^5.5.0"
+  }
+}

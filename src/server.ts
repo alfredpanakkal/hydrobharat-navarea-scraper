@@ -6,6 +6,23 @@ import { DatabaseService } from './services/api';
 import { alert } from './utils/alert';
 import { CONFIG } from './config';
 
+async function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function runWithRetry<T>(fn: () => Promise<T>, retries: number = 3, delay: number = 2000): Promise<T> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      if (attempt === retries) throw err;
+      console.warn(`[Retry] Attempt ${attempt} failed: ${err.message}. Retrying in ${delay}ms...`);
+      await sleep(delay * attempt);
+    }
+  }
+  throw new Error('Unreachable');
+}
+
 async function runPipeline() {
   const liferay = new LiferayClient();
   const parser = new CoordinateParser();
@@ -48,37 +65,42 @@ async function runPipeline() {
         continue;
       }
 
-      // Download and extract PDF text
-      console.log(`[Pipeline] Processing: ${w.title}`);
-      const pdfBuffer = await liferay.downloadPdf(w);
-      const rawText = await extractTextFromPdf(pdfBuffer);
+      // Download and extract PDF text with retry
+      try {
+        console.log(`[Pipeline] Processing: ${w.title}`);
+        const pdfBuffer = await runWithRetry(() => liferay.downloadPdf(w));
+        const rawText = await extractTextFromPdf(pdfBuffer);
 
-      const checksum = parser.generateChecksum(rawText);
-      const prev = existing.get(w.warningId);
+        const checksum = parser.generateChecksum(rawText);
+        const prev = existing.get(w.warningId);
 
-      // Unchanged → touch timestamp only
-      if (prev && prev.checksum === checksum) {
-        await db.touch(w.warningId);
-        continue;
-      }
+        // Unchanged → touch timestamp only
+        if (prev && prev.checksum === checksum) {
+          await db.touch(w.warningId);
+          continue;
+        }
 
-      const parsed = parser.parse(rawText);
-      const base = {
-        warning_id: w.warningId,
-        title: w.title,
-        raw_text: rawText,
-        checksum,
-        ...parsed,
-      };
+        const parsed = parser.parse(rawText);
+        const base = {
+          warning_id: w.warningId,
+          title: w.title,
+          raw_text: rawText,
+          checksum,
+          ...parsed,
+        };
 
-      if (parsed.geometries.length > 0) {
-        ready.push(base);
-      } else {
-        needsLLM.push(base);
+        if (parsed.geometries.length > 0) {
+          ready.push(base);
+        } else {
+          needsLLM.push(base);
+        }
+      } catch (err: any) {
+        console.error(`[Pipeline] Failed to process ${w.title}: ${err.message}`);
+        // Continue with next document instead of crashing
       }
 
       // Rate limit: 1 request per second
-      await new Promise((r) => setTimeout(r, 1000));
+      await sleep(1000);
     }
 
     console.log(
@@ -92,32 +114,47 @@ async function runPipeline() {
         `[Pipeline] LLM batch ${Math.floor(i / CONFIG.LLM_BATCH_SIZE) + 1}/${Math.ceil(needsLLM.length / CONFIG.LLM_BATCH_SIZE)}`
       );
 
-      const llmResult = await extractBatchWithLLM(
-        batch.map((b) => ({ warning_id: b.warning_id, raw_text: b.raw_text }))
-      );
-      llmCalls++;
-
-      for (const item of batch) {
-        const hit = llmResult?.find((r) => r.warning_id === item.warning_id);
-        ready.push(
-          hit
-            ? {
-                ...item,
-                geometries: hit.geometries,
-                extraction_method: 'llm_assisted',
-                confidence_score: 0.92,
-              }
-            : {
-                ...item,
-                extraction_method: 'failed',
-                confidence_score: 0,
-                risk_level: 'HIGH',
-              }
+      try {
+        const llmResult = await runWithRetry(() =>
+          extractBatchWithLLM(
+            batch.map((b) => ({ warning_id: b.warning_id, raw_text: b.raw_text }))
+          )
         );
+        llmCalls++;
+
+        for (const item of batch) {
+          const hit = llmResult?.find((r) => r.warning_id === item.warning_id);
+          ready.push(
+            hit
+              ? {
+                  ...item,
+                  geometries: hit.geometries,
+                  extraction_method: 'llm_assisted',
+                  confidence_score: 0.92,
+                }
+              : {
+                  ...item,
+                  extraction_method: 'failed',
+                  confidence_score: 0,
+                  risk_level: 'HIGH',
+                }
+          );
+        }
+      } catch (err: any) {
+        console.error(`[Pipeline] LLM batch failed: ${err.message}`);
+        // Mark batch as failed
+        for (const item of batch) {
+          ready.push({
+            ...item,
+            extraction_method: 'failed',
+            confidence_score: 0,
+            risk_level: 'HIGH',
+          });
+        }
       }
 
       // Gentle rate limit
-      await new Promise((r) => setTimeout(r, 2000));
+      await sleep(2000);
     }
 
     // Upsert all ready rows

@@ -71,7 +71,8 @@ const CANCEL_REGEX = /CANCEL\s+THIS\s+MSG\s+(\d{4})\s+UTC\s+(\w{3})\s+(\d{2})/i;
 const RADIUS_REGEX = /(?:WITHIN|RADIUS)\s+(\d+(?:\.\d+)?)\s*(?:NM|KM|NAUTICAL\s*MILES)/i;
 const BOUNDED_BY_REGEX = /BOUNDED\s+BY/i;
 const JOINING_REGEX = /JOINING/i;
-const WARNING_HEADER_REGEX = /NAVAREA\s*VIII\s*[-–—]?\s*\d+\s*\/\s*\d{2}/gi;
+const WARNING_HEADER_REGEX =
+  /NAVAREA\s*VIII\s*[-–—]?\s*\d+(?:\s*\/\s*\d{2})?|INDIAN\s+NAV\s+WARNING\s*\(?\s*INW\s*\)?\s*\d+/gi;
 
 function isValidCoord(lat: number, lon: number): boolean {
   return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;

@@ -7,7 +7,8 @@
     "start": "tsx src/server.ts",
     "recon": "tsx src/recon.ts",
     "analyze-review": "tsx src/analyzeReview.ts",
-    "cleanup": "tsx src/cleanup.ts",
+      "cleanup": "tsx src/cleanup.ts",
+      "backfill": "tsx src/backfillSpatial.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "typecheck": "tsc --noEmit"
   },

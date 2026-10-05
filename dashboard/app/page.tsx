@@ -1,7 +1,6 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import type { NavWarning } from "@/lib/types";
 
@@ -87,12 +86,6 @@ export default function Home() {
           <span className="rounded-full bg-zinc-800 px-3 py-1 text-xs text-zinc-300">
             {loading ? "…" : `${warnings.length} row${warnings.length === 1 ? "" : "s"}`}
           </span>
-          <Link
-            href="/admin"
-            className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-          >
-            Admin
-          </Link>
         </div>
         <label className="flex items-center gap-2 text-sm text-zinc-400">
           Source

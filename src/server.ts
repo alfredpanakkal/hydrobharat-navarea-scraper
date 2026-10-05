@@ -82,7 +82,7 @@ async function runPipeline() {
           continue;
         }
 
-        const parsed = parser.parse(rawText);
+        const parsed = parser.parseMulti(rawText);
         const base = {
           warning_id: w.warningId,
           title: w.title,

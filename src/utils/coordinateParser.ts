@@ -71,6 +71,7 @@ const CANCEL_REGEX = /CANCEL\s+THIS\s+MSG\s+(\d{4})\s+UTC\s+(\w{3})\s+(\d{2})/i;
 const RADIUS_REGEX = /(?:WITHIN|RADIUS)\s+(\d+(?:\.\d+)?)\s*(?:NM|KM|NAUTICAL\s*MILES)/i;
 const BOUNDED_BY_REGEX = /BOUNDED\s+BY/i;
 const JOINING_REGEX = /JOINING/i;
+const WARNING_HEADER_REGEX = /NAVAREA\s*VIII\s*[-–—]?\s*\d+\s*\/\s*\d{2}/gi;
 
 function isValidCoord(lat: number, lon: number): boolean {
   return lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180;
@@ -83,6 +84,27 @@ function isWithinNavarea(lat: number, lon: number): boolean {
     lon >= NAVAREA_BOUNDS.lonMin &&
     lon <= NAVAREA_BOUNDS.lonMax
   );
+}
+
+export function splitWarnings(text: string): string[] {
+  const regex = new RegExp(WARNING_HEADER_REGEX.source, WARNING_HEADER_REGEX.flags);
+  const indices: number[] = [];
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(text)) !== null) {
+    indices.push(match.index);
+  }
+
+  if (indices.length === 0) {
+    return [text];
+  }
+
+  const segments: string[] = [];
+  for (let i = 0; i < indices.length; i++) {
+    const start = indices[i];
+    const end = i + 1 < indices.length ? indices[i + 1] : text.length;
+    segments.push(text.slice(start, end));
+  }
+  return segments;
 }
 
 export class CoordinateParser {
@@ -165,6 +187,43 @@ export class CoordinateParser {
       const month = monthMap[cancelMatch[2].toUpperCase()] ?? 0;
       const year = 2000 + parseInt(cancelMatch[3]);
       valid_until_utc = new Date(Date.UTC(year, month, parseInt(day), parseInt(hour)));
+    }
+
+    return {
+      geometries,
+      risk_level,
+      extraction_method: 'deterministic',
+      confidence_score: geometries.length > 0 ? 0.99 : 0,
+      evidence_trail,
+      is_cancelled,
+      cancellation_text,
+      valid_until_utc,
+    };
+  }
+
+  parseMulti(text: string): ParsedCoordinates {
+    const segments = splitWarnings(text);
+    const geometries: Geometry[] = [];
+    const evidence_trail: Array<{ rule: string; match: string }> = [];
+    let risk_level: 'NORMAL' | 'REVIEW' | 'HIGH' = 'NORMAL';
+    let is_cancelled = false;
+    let cancellation_text: string | null = null;
+    let valid_until_utc: Date | null = null;
+
+    for (const segment of segments) {
+      const parsed = this.parse(segment);
+      geometries.push(...parsed.geometries);
+      evidence_trail.push(...parsed.evidence_trail);
+      if (parsed.risk_level === 'HIGH') {
+        risk_level = 'HIGH';
+      } else if (parsed.risk_level === 'REVIEW' && risk_level !== 'HIGH') {
+        risk_level = 'REVIEW';
+      }
+      if (parsed.is_cancelled) {
+        is_cancelled = true;
+        cancellation_text = parsed.cancellation_text;
+        valid_until_utc = parsed.valid_until_utc;
+      }
     }
 
     return {

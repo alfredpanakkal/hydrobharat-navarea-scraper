@@ -13,8 +13,8 @@ Full-stack maritime navigational warning tracker with **dual backend** scrapers 
 
 Both upsert into the **`nav_warnings`** table with conflict key **`(source_id, warning_id)`** and mark records no longer present as `is_cancelled: true`.
 
-- Node.js pipeline: Liferay headless delivery API → PDF download → `pdf-parse` → deterministic coordinate parser → LLM (Mistral/Gemini) fallback for hard cases → batch upsert.
-- Python pipeline: NHO `nho-headless/map/combined` JSON → transform → batch upsert.
+- Node.js pipeline: Liferay headless delivery API → PDF download → `pdf-parse` → **`parseMulti`** (splits the full "warnings in force" list into per-warning segments at `NAVAREA VIII -NNN/YY` headers, then parses each) → LLM (Mistral/Gemini) fallback for hard cases → batch upsert.
+- Python pipeline: NHO `nho-headless/map/combined` JSON → transform (incl. `dtg`/`b_char` fields) → batch upsert.
 
 ### Frontend — Next.js 16 App Router (`dashboard/`)
 
@@ -32,6 +32,8 @@ Both upsert into the **`nav_warnings`** table with conflict key **`(source_id, w
 
 - **Database:** Supabase PostgreSQL, table `nav_warnings` (+ `raw_messages` archive, `scraper_runs` log, `nav_warnings_map` view).
 - **Spatial column:** `spatial` JSONB array of `{ type: "point"|"polygon"|"line"|"circle", coords: [{lat,lon}], radius_nm? }`.
+- **Coordinate convention:** stored coords are `{lat, lon}` objects; Leaflet arrays are `[lat, lon]`; GeoJSON/wire coordinates are `[lon, lat]`. Convert at the boundary only — **never flip coordinates in stored data or the map renderer** (flipping breaks a correct map; ordering bugs live in the parser).
+- **Per-warning segmentation:** one source PDF = the whole "warnings in force" list. `splitWarnings`/`parseMulti` (`src/utils/coordinateParser.ts`) split at `NAVAREA VIII -NNN/YY` headers so each warning's geometry is parsed separately. Never merge coordinates across warnings — a single mega-polygon spans the whole NAVAREA and distorts the map.
 - **Risk levels:** `HIGH`, `REVIEW`, `NORMAL`.
 - **Extraction methods:** `deterministic`, `llm_assisted`, `nho_json`, `failed`.
 - **Env vars:** `SUPABASE_URL`, `SUPABASE_KEY` (service role), `LIFERAY_USER`, `LIFERAY_PASS`, `MISTRAL_API_KEY`, `GEMINI_API_KEY`, `ALERT_WEBHOOK`, `NHO_CLIENT_ID`, `NHO_CLIENT_SECRET`.

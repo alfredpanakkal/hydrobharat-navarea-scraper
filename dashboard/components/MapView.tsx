@@ -21,15 +21,20 @@ function colorFor(risk: string | null): string {
   return RISK_COLORS[risk ?? ""] ?? "#71717a";
 }
 
+function positionsFor(item: SpatialItem): [number, number][] {
+  return item.coords
+    .filter((c) => Number.isFinite(c.lat) && Number.isFinite(c.lon))
+    .map((c) => [c.lat, c.lon]);
+}
+
 function GeometryLayer({ item, risk }: { item: SpatialItem; risk: string | null }) {
   const color = colorFor(risk);
-  const positions = item.coords.map(
-    (c) => [c.lat, c.lon] as [number, number]
-  );
 
   switch (item.type) {
     case "point": {
-      const [p] = item.coords;
+      const p = item.coords.find(
+        (c) => Number.isFinite(c.lat) && Number.isFinite(c.lon)
+      );
       if (!p) return null;
       return (
         <CircleMarker
@@ -40,10 +45,11 @@ function GeometryLayer({ item, risk }: { item: SpatialItem; risk: string | null 
       );
     }
     case "circle": {
-      const [p] = item.coords;
-      if (!p) return null;
+      const p = item.coords.find(
+        (c) => Number.isFinite(c.lat) && Number.isFinite(c.lon)
+      );
       const radius = (item.radius_nm ?? 0) * 1852;
-      if (radius <= 0) return null;
+      if (!p || radius <= 0) return null;
       return (
         <Circle
           center={[p.lat, p.lon]}
@@ -52,15 +58,21 @@ function GeometryLayer({ item, risk }: { item: SpatialItem; risk: string | null 
         />
       );
     }
-    case "polygon":
+    case "polygon": {
+      const positions = positionsFor(item);
+      if (positions.length < 3) return null;
       return (
         <Polygon
           positions={positions}
           pathOptions={{ color, fillColor: color, fillOpacity: 0.25 }}
         />
       );
-    case "line":
+    }
+    case "line": {
+      const positions = positionsFor(item);
+      if (positions.length < 2) return null;
       return <Polyline positions={positions} pathOptions={{ color, weight: 3 }} />;
+    }
     default:
       return null;
   }
@@ -81,7 +93,7 @@ export default function MapView({ warnings }: { warnings: NavWarning[] }) {
       {warnings.flatMap((w) =>
         (w.spatial ?? []).map((item, i) => (
           <GeometryLayer
-            key={`${w.id}-${i}`}
+            key={`${w.source_id}:${w.warning_id ?? w.id}:${i}`}
             item={item}
             risk={w.risk_level}
           />

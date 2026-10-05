@@ -1,5 +1,4 @@
 import { supabase } from "@/lib/supabase";
-import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
@@ -46,6 +45,25 @@ function RiskBadge({ level }: { level: string | null }) {
   );
 }
 
+function Pill({
+  label,
+  value,
+  className,
+}: {
+  label: string;
+  value: number;
+  className: string;
+}) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs ${className}`}
+    >
+      <span className="font-semibold">{value}</span>
+      {label}
+    </span>
+  );
+}
+
 export default async function AdminPage() {
   const { data, error } = await supabase
     .from("nav_warnings")
@@ -64,23 +82,35 @@ export default async function AdminPage() {
 
   return (
     <div className="min-h-dvh bg-zinc-950 p-6 text-zinc-100">
-      <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">
-            Admin Dashboard
-          </h1>
-          <p className="mt-1 text-sm text-zinc-400">
-            {warnings.length} warnings · {activeCount} active ·{" "}
-            {cancelledCount} cancelled · {highRiskCount} high-risk ·{" "}
-            {withSpatial} with geometry
-          </p>
+      <header className="mb-6">
+        <h1 className="text-2xl font-bold tracking-tight">Admin Dashboard</h1>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Pill
+            label="total"
+            value={warnings.length}
+            className="border-zinc-700 bg-zinc-900 text-zinc-300"
+          />
+          <Pill
+            label="active"
+            value={activeCount}
+            className="border-emerald-800 bg-emerald-500/10 text-emerald-400"
+          />
+          <Pill
+            label="cancelled"
+            value={cancelledCount}
+            className="border-zinc-700 bg-zinc-900 text-zinc-500"
+          />
+          <Pill
+            label="high-risk"
+            value={highRiskCount}
+            className="border-red-800 bg-red-500/10 text-red-400"
+          />
+          <Pill
+            label="with geometry"
+            value={withSpatial}
+            className="border-blue-800 bg-blue-500/10 text-blue-400"
+          />
         </div>
-        <Link
-          href="/"
-          className="rounded-md border border-zinc-800 bg-zinc-900 px-4 py-2 text-sm text-zinc-200 hover:bg-zinc-800"
-        >
-          ← Back to Map
-        </Link>
       </header>
 
       {error ? (

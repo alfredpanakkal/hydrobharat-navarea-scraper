@@ -39,11 +39,10 @@ def require_env(key: str) -> str:
 
 
 def require_supabase_key() -> str:
-    for key in ("SUPABASE_KEY", "SUPABASE_SERVICE_ROLE_KEY"):
-        v = os.environ.get(key)
-        if v:
-            return v
-    raise SystemExit("Missing env var: SUPABASE_KEY (or SUPABASE_SERVICE_ROLE_KEY)")
+    v = os.environ.get("SUPABASE_KEY")
+    if not v:
+        raise SystemExit("Missing env var: SUPABASE_KEY")
+    return v
 
 
 def discover_js_bundles(html: str) -> list[str]:
@@ -107,13 +106,41 @@ def fetch_credentials(session: requests.Session) -> tuple[str, str]:
     )
 
 
-def fetch_combined_data(
+def fetch_oauth_token(
     session: requests.Session, client_id: str, client_secret: str
-) -> Any:
+) -> str:
+    log.info("Requesting OAuth2 access token (client_credentials)...")
+    resp = session.post(
+        f"{NHO_BASE}/o/oauth2/token",
+        data={
+            "grant_type": "client_credentials",
+            "client_id": client_id,
+            "client_secret": client_secret,
+        },
+        headers={"Accept": "application/json"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    try:
+        payload = resp.json()
+    except ValueError:
+        raise SystemExit("Unexpected non-JSON response from OAuth2 token endpoint")
+    token = payload.get("access_token")
+    if not token:
+        raise SystemExit(
+            f"OAuth2 token response missing access_token (keys: {list(payload.keys())})"
+        )
+    log.info("OAuth2 access token acquired")
+    return token
+
+
+def fetch_combined_data(session: requests.Session, access_token: str) -> Any:
     resp = session.get(
         NHO_MAP_URL,
-        params={"client_id": client_id, "client_secret": client_secret},
-        headers={"Accept": "application/json"},
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {access_token}",
+        },
         timeout=60,
     )
     resp.raise_for_status()
@@ -207,12 +234,22 @@ def detect_cancellation(message: str) -> tuple[bool, str | None]:
     return False, None
 
 
+def first_str(raw: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for k in keys:
+        v = raw.get(k)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
 def transform_notice(raw: dict[str, Any]) -> dict[str, Any]:
     identifier = raw.get("identifier") or raw.get("id") or raw.get("warning_id") or "unknown"
     year = raw.get("year") or raw.get("notice_year")
     notice = raw.get("notice") or raw.get("notice_number") or raw.get("number")
     message = raw.get("message") or raw.get("text") or raw.get("body") or ""
     geometry = raw.get("geometry") or raw.get("geom") or raw.get("spatial")
+    dtg = first_str(raw, ("dtg", "date_time_group", "dateTimeGroup", "date_group"))
+    b_char = first_str(raw, ("b_char", "bChar", "broadcast_char", "bch"))
 
     spatial = normalize_geometry(geometry)
     is_cancelled, cancellation_text = detect_cancellation(str(message))
@@ -222,18 +259,28 @@ def transform_notice(raw: dict[str, Any]) -> dict[str, Any]:
     else:
         warning_id = str(identifier)
 
+    evidence_trail: list[dict[str, str]] = []
+    if dtg:
+        evidence_trail.append({"rule": "nho_json:dtg", "match": dtg[:200]})
+    if b_char:
+        evidence_trail.append({"rule": "nho_json:b_char", "match": b_char[:200]})
+
+    base_title = f"NAVAREA VIII {identifier}" if str(identifier) else "NAVAREA VIII"
+    suffix = " · ".join(p for p in (dtg, b_char) if p)
+    title = f"{base_title} · {suffix}" if suffix else base_title
+
     now = datetime.now(timezone.utc).isoformat()
     return {
         "warning_id": warning_id,
         "source_id": SOURCE_ID,
-        "title": f"NAVAREA VIII {identifier}" if str(identifier) else "NAVAREA VIII",
+        "title": title,
         "raw_text": str(message),
         "checksum": checksum_text(str(message)),
         "revision": 1,
         "previous_checksum": None,
         "spatial": spatial,
         "spatial_groups": [],
-        "evidence_trail": [],
+        "evidence_trail": evidence_trail,
         "extraction_method": "nho_json",
         "confidence_score": 0.95,
         "risk_level": "NORMAL",
@@ -272,7 +319,8 @@ def run_scrape() -> None:
     session.headers.update({"User-Agent": "navarea-nho-scraper/1.0"})
 
     client_id, client_secret = fetch_credentials(session)
-    data = fetch_combined_data(session, client_id, client_secret)
+    access_token = fetch_oauth_token(session, client_id, client_secret)
+    data = fetch_combined_data(session, access_token)
     notices = extract_notices(data)
 
     if not notices:
@@ -308,7 +356,8 @@ def run_scrape() -> None:
     active_ids = [r["warning_id"] for r in (active.data or [])]
     missing = [wid for wid in active_ids if wid not in seen_ids]
     cancelled = 0
-    for wid in missing:
+    for i in range(0, len(missing), 100):
+        chunk = missing[i : i + 100]
         resp = (
             supabase.table("nav_warnings")
             .update(
@@ -317,14 +366,14 @@ def run_scrape() -> None:
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
             )
-            .eq("warning_id", wid)
             .eq("source_id", SOURCE_ID)
+            .in_("warning_id", chunk)
             .execute()
         )
         if resp.error:
-            log.error("Cancel update error for %s: %s", wid, resp.error.message)
+            log.error("Batch cancel error (%d ids): %s", len(chunk), resp.error.message)
         else:
-            cancelled += 1
+            cancelled += len(chunk)
     if missing:
         log.info("Marked %d missing record(s) as cancelled", cancelled)
 

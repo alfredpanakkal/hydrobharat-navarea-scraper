@@ -7,16 +7,11 @@ interface AdminWarningRow {
   warning_id: string;
   source_id: string;
   title: string | null;
-  raw_text: string | null;
-  checksum: string | null;
   revision: number | null;
   spatial: unknown[] | null;
   extraction_method: string | null;
-  confidence_score: number | null;
   risk_level: string | null;
   is_cancelled: boolean | null;
-  cancellation_text: string | null;
-  valid_until_utc: string | null;
   last_seen_at: string | null;
   updated_at: string | null;
 }
@@ -66,7 +61,7 @@ function Pill({
 
 export default async function AdminPage() {
   const { data, error } = await supabase
-    .from("nav_warnings")
+    .from("nav_warnings_admin")
     .select("*")
     .order("updated_at", { ascending: false })
     .limit(100);
@@ -208,7 +203,8 @@ export default async function AdminPage() {
       <footer className="mt-4 text-xs text-zinc-600">
         Showing latest {warnings.length} rows from{" "}
         <code className="rounded bg-zinc-900 px-1 py-0.5">nav_warnings</code>{" "}
-        table.
+        via the <code className="rounded bg-zinc-900 px-1 py-0.5">nav_warnings_admin</code>{" "}
+        view.
       </footer>
     </div>
   );

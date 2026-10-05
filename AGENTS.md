@@ -19,7 +19,7 @@ Both upsert into the **`nav_warnings`** table with conflict key **`(source_id, w
 ### Frontend — Next.js 16 App Router (`dashboard/`)
 
 - `/` — Leaflet map (react-leaflet) with per-source filtering and risk-level coloring. Client component fetching `/api/warnings`.
-- `/admin` — Server Component table of the latest 100 rows from `nav_warnings` (force-dynamic).
+- `/admin` — Server Component table of the latest 100 rows from `nav_warnings_admin` view (force-dynamic).
 - `/api/warnings` — Route handler querying `nav_warnings_map`, supports `?source=` filter.
 - Supabase client: `dashboard/lib/supabase.ts`. Types: `dashboard/lib/types.ts`, `src/types.ts`.
 
@@ -30,7 +30,8 @@ Both upsert into the **`nav_warnings`** table with conflict key **`(source_id, w
 
 ## Key Conventions
 
-- **Database:** Supabase PostgreSQL, table `nav_warnings` (+ `raw_messages` archive, `scraper_runs` log, `nav_warnings_map` view).
+- **Database:** Supabase PostgreSQL, table `nav_warnings` (+ `raw_messages` archive, `scraper_runs` log, `nav_warnings_map` view, `nav_warnings_admin` view).
+- **RLS:** base tables are service-role only — anon reads must go through views (`nav_warnings_map` for the map, `nav_warnings_admin` for `/admin`). The dashboard anon client gets empty results from `nav_warnings` directly.
 - **Spatial column:** `spatial` JSONB array of `{ type: "point"|"polygon"|"line"|"circle", coords: [{lat,lon}], radius_nm? }`.
 - **Coordinate convention:** stored coords are `{lat, lon}` objects; Leaflet arrays are `[lat, lon]`; GeoJSON/wire coordinates are `[lon, lat]`. Convert at the boundary only — **never flip coordinates in stored data or the map renderer** (flipping breaks a correct map; ordering bugs live in the parser).
 - **Per-warning segmentation:** one source PDF = the whole "warnings in force" list. `splitWarnings`/`parseMulti` (`src/utils/coordinateParser.ts`) split at `NAVAREA VIII -NNN/YY` headers so each warning's geometry is parsed separately. Never merge coordinates across warnings — a single mega-polygon spans the whole NAVAREA and distorts the map.

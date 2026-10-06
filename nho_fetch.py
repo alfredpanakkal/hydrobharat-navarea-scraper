@@ -444,45 +444,42 @@ def run_scrape() -> None:
     upserted = 0
     for i in range(0, len(records), batch_size):
         batch = records[i : i + batch_size]
-        resp = (
+        try:
+            supabase.table("nav_warnings").upsert(
+                batch, on_conflict="source_id,warning_id"
+            ).execute()
+        except Exception as e:
+            log.error("Upsert error: %s", e)
+            continue
+        upserted += len(batch)
+        log.info("Upserted batch %d..%d", i, i + len(batch))
+
+    try:
+        active = (
             supabase.table("nav_warnings")
-            .upsert(batch, on_conflict="source_id,warning_id")
+            .select("warning_id")
+            .eq("source_id", SOURCE_ID)
+            .eq("is_cancelled", False)
             .execute()
         )
-        if resp.error:
-            log.error("Upsert error: %s", resp.error.message)
-        else:
-            upserted += len(batch)
-            log.info("Upserted batch %d..%d", i, i + len(batch))
-
-    active = (
-        supabase.table("nav_warnings")
-        .select("warning_id")
-        .eq("source_id", SOURCE_ID)
-        .eq("is_cancelled", False)
-        .execute()
-    )
+    except Exception as e:
+        raise SystemExit(f"Failed to list active NHO warnings: {e}")
     active_ids = [r["warning_id"] for r in (active.data or [])]
     missing = [wid for wid in active_ids if wid not in seen_ids]
     cancelled = 0
     for i in range(0, len(missing), 100):
         chunk = missing[i : i + 100]
-        resp = (
-            supabase.table("nav_warnings")
-            .update(
+        try:
+            supabase.table("nav_warnings").update(
                 {
                     "is_cancelled": True,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
-            )
-            .eq("source_id", SOURCE_ID)
-            .in_("warning_id", chunk)
-            .execute()
-        )
-        if resp.error:
-            log.error("Batch cancel error (%d ids): %s", len(chunk), resp.error.message)
-        else:
-            cancelled += len(chunk)
+            ).eq("source_id", SOURCE_ID).in_("warning_id", chunk).execute()
+        except Exception as e:
+            log.error("Batch cancel error (%d ids): %s", len(chunk), e)
+            continue
+        cancelled += len(chunk)
     if missing:
         log.info("Marked %d missing record(s) as cancelled", cancelled)
 

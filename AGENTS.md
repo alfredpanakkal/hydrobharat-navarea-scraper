@@ -49,3 +49,9 @@ Both upsert into the **`nav_warnings`** table with conflict key **`(source_id, w
 - Dashboard dev: `cd dashboard && npm run dev`
 - Dashboard typecheck: `cd dashboard && npx tsc --noEmit`
 - Python scraper: `venv\Scripts\python.exe nho_fetch.py` (probe: `... nho_fetch.py probe`)
+
+## Post-mortem: Edge Function `scrape-navarea-india` (retired 2026-10-06)
+
+The Edge Function assumed server-rendered HTML tables; hydrobharat.gov.in publishes NAVAREA warnings as PDFs behind its Liferay API, so the Cheerio parser had nothing to find. With no HTTP status check, no row-count diagnostics, and `success: true` returned unconditionally, it reported healthy while saving zero — for 19 days. It was retired because the repo's two version-controlled pipelines (Liferay→PDF and NHO JSON) already covered the same source with real error handling.
+
+**Durable lesson:** empty-result success is the most dangerous state a scraper can be in. The instrumented pattern in the archive (`supabase/functions/scrape-navarea-india/index.ts`) — status check, HTML metrics, diagnostics in the response body — is the template to reuse if a third source ever needs scraping.

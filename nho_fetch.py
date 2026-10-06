@@ -295,7 +295,6 @@ def transform_notice(
         "spatial_groups": [],
         "evidence_trail": evidence_trail,
         "extraction_method": "nho_json",
-        "confidence_score": 0.95,
         "risk_level": "NORMAL",
         "is_cancelled": is_cancelled,
         "cancellation_text": cancellation_text,

@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import logging
@@ -15,6 +16,9 @@ log = logging.getLogger("nho_fetch")
 
 NHO_BASE = "https://hydrobharat.gov.in"
 NHO_MAP_URL = f"{NHO_BASE}/o/nho-headless/map/combined"
+NHO_TOKEN_URL = f"{NHO_BASE}/o/oauth2/token"
+LIFERAY_API_BASE = f"{NHO_BASE}/o/headless-delivery/v1.0"
+LIFERAY_TEST_PATH = "/document-folders/288109/documents?page=1&pageSize=1"
 SOURCE_ID = "nho-portal"
 
 CLIENT_ID_PATTERNS = [
@@ -304,10 +308,79 @@ def extract_notices(data: Any) -> list[dict[str, Any]]:
 
 
 def run_probe() -> None:
-    log.info("Probe mode: validating environment...")
-    require_env("SUPABASE_URL")
-    require_supabase_key()
-    log.info("Environment OK")
+    log.info("Probe mode: testing auth options for %s", NHO_MAP_URL)
+    session = requests.Session()
+    session.headers.update({"User-Agent": "navarea-nho-scraper/1.0"})
+
+    results: list[tuple[str, requests.Response | None]] = []
+
+    resp = try_get(session, NHO_MAP_URL)
+    results.append(("anonymous GET nho-headless/map/combined", resp))
+
+    user = os.environ.get("LIFERAY_USER")
+    password = os.environ.get("LIFERAY_PASS")
+    if user and password:
+        auth = basic_auth_header(user, password)
+        resp = try_get(session, NHO_MAP_URL, {"Authorization": auth})
+        results.append(("Basic LIFERAY_* on nho-headless/map/combined", resp))
+        resp = try_get(
+            session,
+            LIFERAY_API_BASE + LIFERAY_TEST_PATH,
+            {"Authorization": auth, "Accept": "application/json"},
+        )
+        results.append(("Basic LIFERAY_* on headless-delivery control", resp))
+    else:
+        log.info("LIFERAY_USER/LIFERAY_PASS not set; skipping Basic probes")
+
+    client_id = os.environ.get("NHO_CLIENT_ID")
+    client_secret = os.environ.get("NHO_CLIENT_SECRET")
+    if client_id and client_secret:
+        resp = try_post_token(session, client_id, client_secret)
+        results.append(("OAuth client_credentials via NHO_* secrets", resp))
+    else:
+        log.info("NHO_CLIENT_ID/NHO_CLIENT_SECRET not set; skipping OAuth probe")
+
+    log.info("---- auth probe results ----")
+    for label, resp in results:
+        if resp is None:
+            log.info("%-48s -> network error", label)
+            continue
+        snippet = (resp.text or "")[:160].replace("\n", " ").strip()
+        log.info("%-48s -> HTTP %s | %s", label, resp.status_code, snippet)
+
+
+def try_get(
+    session: requests.Session, url: str, headers: dict[str, str] | None = None
+) -> requests.Response | None:
+    try:
+        return session.get(url, headers=headers or {}, timeout=30)
+    except requests.RequestException as e:
+        log.error("GET %s failed: %s", url, e)
+        return None
+
+
+def try_post_token(
+    session: requests.Session, client_id: str, client_secret: str
+) -> requests.Response | None:
+    try:
+        return session.post(
+            NHO_TOKEN_URL,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            headers={"Accept": "application/json"},
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        log.error("POST %s failed: %s", NHO_TOKEN_URL, e)
+        return None
+
+
+def basic_auth_header(user: str, password: str) -> str:
+    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
 
 
 def run_scrape() -> None:

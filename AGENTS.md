@@ -11,6 +11,8 @@ Full-stack maritime navigational warning tracker with **dual backend** scrapers 
 | Node.js/TypeScript | `src/server.ts` (`npm start`) | `hydrobharat-gov-in` | Liferay Basic auth (`LIFERAY_USER`/`LIFERAY_PASS`) | daily 06:00 UTC |
 | Python | `nho_fetch.py` | `nho-portal` | HTTP Basic (`LIFERAY_USER`/`LIFERAY_PASS`, primary) or OAuth2 client credentials (`NHO_CLIENT_ID`/`NHO_CLIENT_SECRET`) | every 6 hours |
 
+> **Retired (2026-10-06):** Edge Function `scrape-navarea-india` (HTML scrape of `hydrobharat.gov.in/navarea-warnings`). Archived at `supabase/functions/scrape-navarea-india/`. Never produced data (`source_id: india-hydrobharat-html` absent from `nav_warnings`). The two repo scrapers cover the same NHO/hydrobharat data via official APIs (Liferay PDF + NHO JSON).
+
 Both upsert into the **`nav_warnings`** table with conflict key **`(source_id, warning_id)`** and mark records no longer present as `is_cancelled: true`.
 
 - Node.js pipeline: Liferay headless delivery API → PDF download → `pdf-parse` → **`parseMulti`** (splits the full "warnings in force" list into per-warning segments at `NAVAREA VIII -NNN/YY` headers, then parses each) → LLM (Mistral/Gemini) fallback for hard cases → batch upsert.

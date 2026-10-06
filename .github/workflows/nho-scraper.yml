@@ -43,6 +43,14 @@ jobs:
         run: |
           python nho_fetch.py probe
 
+      - name: Upload probe dump
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.probe }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nho-combined-dump
+          path: recon/nho-combined.json
+          if-no-files-found: ignore
+
       - name: Run NHO scraper
         if: ${{ github.event_name != 'workflow_dispatch' || !inputs.probe }}
         env:

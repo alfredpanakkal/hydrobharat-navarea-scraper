@@ -341,12 +341,35 @@ def run_probe() -> None:
         log.info("NHO_CLIENT_ID/NHO_CLIENT_SECRET not set; skipping OAuth probe")
 
     log.info("---- auth probe results ----")
+    working_auth: dict[str, str] | None = None
     for label, resp in results:
         if resp is None:
             log.info("%-48s -> network error", label)
             continue
         snippet = (resp.text or "")[:160].replace("\n", " ").strip()
         log.info("%-48s -> HTTP %s | %s", label, resp.status_code, snippet)
+        if resp.status_code == 200 and "LIFERAY" in label:
+            working_auth = {"Authorization": basic_auth_header(user, password)}
+
+    if working_auth:
+        dump_raw_response(session, working_auth)
+
+
+def dump_raw_response(
+    session: requests.Session, headers: dict[str, str]
+) -> None:
+    resp = try_get(session, NHO_MAP_URL, headers)
+    if resp is None:
+        log.error("Re-fetch for raw dump failed")
+        return
+    log.info("Raw response: HTTP %s, %d bytes", resp.status_code, len(resp.content))
+    out_dir = os.path.join(os.getcwd(), "recon")
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "nho-combined.json")
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(resp.text)
+    log.info("Wrote raw response to %s", out_path)
+    log.info("Head: %s", resp.text[:500])
 
 
 def try_get(

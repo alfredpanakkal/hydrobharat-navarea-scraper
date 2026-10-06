@@ -1,4 +1,5 @@
 import { supabase } from "@/lib/supabase";
+import AdminWarningsTable from "./AdminWarningsTable";
 
 export const dynamic = "force-dynamic";
 

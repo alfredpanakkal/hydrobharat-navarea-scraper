@@ -21,19 +21,6 @@ LIFERAY_API_BASE = f"{NHO_BASE}/o/headless-delivery/v1.0"
 LIFERAY_TEST_PATH = "/document-folders/288109/documents?page=1&pageSize=1"
 SOURCE_ID = "nho-portal"
 
-CLIENT_ID_PATTERNS = [
-    r"""client_id["']?\s*[:=]\s*["']([^"']+)["']""",
-    r"""clientId["']?\s*[:=]\s*["']([^"']+)["']""",
-    r"""CLIENT_ID["']?\s*[:=]\s*["']([^"']+)["']""",
-    r"""client_id["']?\s*:\s*["']([^"']+)["']""",
-]
-CLIENT_SECRET_PATTERNS = [
-    r"""client_secret["']?\s*[:=]\s*["']([^"']+)["']""",
-    r"""clientSecret["']?\s*[:=]\s*["']([^"']+)["']""",
-    r"""CLIENT_SECRET["']?\s*[:=]\s*["']([^"']+)["']""",
-    r"""client_secret["']?\s*:\s*["']([^"']+)["']""",
-]
-
 
 def require_env(key: str) -> str:
     v = os.environ.get(key)
@@ -49,64 +36,28 @@ def require_supabase_key() -> str:
     return v
 
 
-def discover_js_bundles(html: str) -> list[str]:
-    urls = re.findall(r"""(?:src|href)=["']([^"']+\.js[^"']*)["']""", html)
-    out: list[str] = []
-    for u in urls:
-        if u.startswith("http"):
-            out.append(u)
-        elif u.startswith("/"):
-            out.append(NHO_BASE + u)
-        else:
-            out.append(NHO_BASE + "/" + u)
-    seen: set[str] = set()
-    unique: list[str] = []
-    for u in out:
-        if u not in seen:
-            seen.add(u)
-            unique.append(u)
-    return unique
+def basic_auth_header(user: str, password: str) -> str:
+    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+    return f"Basic {token}"
 
 
-def search_patterns(text: str, patterns: list[str]) -> str | None:
-    for p in patterns:
-        m = re.search(p, text)
-        if m:
-            return m.group(1)
-    return None
+def resolve_auth_headers(session: requests.Session) -> dict[str, str]:
+    user = os.environ.get("LIFERAY_USER")
+    password = os.environ.get("LIFERAY_PASS")
+    if user and password:
+        log.info("Using HTTP Basic auth (LIFERAY_USER / LIFERAY_PASS)")
+        return {"Authorization": basic_auth_header(user, password)}
 
-
-def fetch_credentials(session: requests.Session) -> tuple[str, str]:
-    env_id = os.environ.get("NHO_CLIENT_ID")
-    env_secret = os.environ.get("NHO_CLIENT_SECRET")
-    if env_id and env_secret:
-        log.info("Using credentials from NHO_CLIENT_ID / NHO_CLIENT_SECRET")
-        return env_id, env_secret
-
-    log.info("Fetching NHO map page to discover JS bundles...")
-    resp = session.get(NHO_MAP_URL, timeout=30)
-    resp.raise_for_status()
-    html = resp.text
-
-    bundles = discover_js_bundles(html)
-    log.info("Found %d JS bundle URL(s)", len(bundles))
-
-    for bundle in bundles:
-        try:
-            js = session.get(bundle, timeout=30).text
-        except requests.RequestException as e:
-            log.warning("Failed to fetch %s: %s", bundle, e)
-            continue
-        cid = search_patterns(js, CLIENT_ID_PATTERNS)
-        sec = search_patterns(js, CLIENT_SECRET_PATTERNS)
-        if cid and sec:
-            log.info("Credentials discovered in %s", bundle)
-            return cid, sec
-        if cid or sec:
-            log.debug("Partial credential match in %s (id=%s)", bundle, bool(cid))
+    client_id = os.environ.get("NHO_CLIENT_ID")
+    client_secret = os.environ.get("NHO_CLIENT_SECRET")
+    if client_id and client_secret:
+        token = fetch_oauth_token(session, client_id, client_secret)
+        return {"Authorization": f"Bearer {token}"}
 
     raise SystemExit(
-        "Could not discover client_id/client_secret. Set NHO_CLIENT_ID and NHO_CLIENT_SECRET env vars."
+        "No NHO credentials configured. Set LIFERAY_USER/LIFERAY_PASS "
+        "(HTTP Basic, preferred) or NHO_CLIENT_ID/NHO_CLIENT_SECRET "
+        "(OAuth2 client_credentials) and re-run."
     )
 
 
@@ -114,17 +65,24 @@ def fetch_oauth_token(
     session: requests.Session, client_id: str, client_secret: str
 ) -> str:
     log.info("Requesting OAuth2 access token (client_credentials)...")
-    resp = session.post(
-        f"{NHO_BASE}/o/oauth2/token",
-        data={
-            "grant_type": "client_credentials",
-            "client_id": client_id,
-            "client_secret": client_secret,
-        },
-        headers={"Accept": "application/json"},
-        timeout=30,
-    )
-    resp.raise_for_status()
+    try:
+        resp = session.post(
+            NHO_TOKEN_URL,
+            data={
+                "grant_type": "client_credentials",
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            headers={"Accept": "application/json"},
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        raise SystemExit(f"OAuth2 token request failed: {e}")
+    if resp.status_code >= 400:
+        raise SystemExit(
+            f"OAuth2 token endpoint returned HTTP {resp.status_code}: "
+            f"{resp.text[:200]}"
+        )
     try:
         payload = resp.json()
     except ValueError:
@@ -138,16 +96,22 @@ def fetch_oauth_token(
     return token
 
 
-def fetch_combined_data(session: requests.Session, access_token: str) -> Any:
-    resp = session.get(
-        NHO_MAP_URL,
-        headers={
-            "Accept": "application/json",
-            "Authorization": f"Bearer {access_token}",
-        },
-        timeout=60,
-    )
-    resp.raise_for_status()
+def fetch_combined_data(
+    session: requests.Session, auth_headers: dict[str, str]
+) -> Any:
+    try:
+        resp = session.get(
+            NHO_MAP_URL,
+            headers={**auth_headers, "Accept": "application/json"},
+            timeout=60,
+        )
+    except requests.RequestException as e:
+        raise SystemExit(f"GET {NHO_MAP_URL} failed: {e}")
+    if resp.status_code >= 400:
+        raise SystemExit(
+            f"NHO endpoint returned HTTP {resp.status_code} for {NHO_MAP_URL}: "
+            f"{resp.text[:200]}"
+        )
     try:
         return resp.json()
     except ValueError:
@@ -158,73 +122,62 @@ def checksum_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def normalize_point(coord: Any) -> dict[str, Any] | None:
-    if isinstance(coord, dict):
-        lat = coord.get("lat")
-        lon = coord.get("lon") or coord.get("lng")
-        if lat is not None and lon is not None:
-            return {"lat": float(lat), "lon": float(lon)}
-    if isinstance(coord, (list, tuple)) and len(coord) >= 2:
-        return {"lat": float(coord[1]), "lon": float(coord[0])}
-    return None
-
-
-def normalize_geometry(geometry: Any) -> list[dict[str, Any]]:
-    spatial: list[dict[str, Any]] = []
-    if not geometry:
-        return spatial
-
-    geoms = geometry if isinstance(geometry, list) else [geometry]
-    for g in geoms:
-        if not isinstance(g, dict):
-            continue
-        gtype = str(g.get("type", "")).lower()
-        coords = g.get("coordinates", g.get("coords", []))
-
-        if gtype == "point":
-            pt = normalize_point(coords) if not isinstance(coords, list) else None
-            if pt is None and isinstance(coords, (list, tuple)) and len(coords) >= 2:
-                if isinstance(coords[0], (list, tuple)):
-                    pt = normalize_point(coords[0])
-                else:
-                    pt = {"lat": float(coords[1]), "lon": float(coords[0])}
-            if pt:
-                spatial.append({"type": "point", "coords": [pt]})
-        elif gtype == "circle":
-            pt = None
-            if isinstance(coords, (list, tuple)) and len(coords) >= 2:
-                if isinstance(coords[0], (list, tuple)):
-                    pt = normalize_point(coords[0])
-                else:
-                    pt = {"lat": float(coords[1]), "lon": float(coords[0])}
-            radius = g.get("radius_nm", g.get("radius"))
-            if pt:
-                spatial.append(
-                    {
-                        "type": "circle",
-                        "coords": [pt],
-                        "radius_nm": float(radius) if radius is not None else 0,
-                    }
-                )
-        elif gtype in ("polygon", "multipolygon"):
-            ring = coords
-            if isinstance(coords, (list, tuple)) and coords and isinstance(coords[0], (list, tuple)):
-                if isinstance(coords[0][0], (list, tuple)):
-                    ring = coords[0]
-            pts = [normalize_point(p) for p in ring]
-            pts = [p for p in pts if p is not None]
-            if pts:
-                spatial.append({"type": "polygon", "coords": pts})
-        elif gtype == "line":
-            pts = [normalize_point(p) for p in coords]
-            pts = [p for p in pts if p is not None]
-            if pts:
-                spatial.append({"type": "line", "coords": pts})
+def parse_nho_coordinate(value: Any) -> float | None:
+    text = str(value).strip().replace(" ", "")
+    if not text:
+        return None
+    negative = text.startswith("-")
+    text = text.lstrip("+-")
+    parts = text.split(",")
+    try:
+        if len(parts) == 2 and parts[0] and parts[1]:
+            decimal = float(parts[0]) + float(parts[1]) / 60.0
         else:
-            pt = normalize_point(coords)
-            if pt:
-                spatial.append({"type": "point", "coords": [pt]})
-    return spatial
+            decimal = float(text.replace(",", "."))
+    except ValueError:
+        return None
+    return -decimal if negative else decimal
+
+
+def load_coordinate_list(raw: Any) -> list[dict[str, Any]]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return []
+    if not isinstance(raw, list):
+        return []
+    points: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        lat = parse_nho_coordinate(entry.get("lat"))
+        lon = parse_nho_coordinate(
+            entry.get("long") or entry.get("lon") or entry.get("lng")
+        )
+        if lat is not None and lon is not None:
+            points.append({"lat": lat, "lon": lon})
+    return points
+
+
+def parse_nho_geometry(
+    feature: Any, coordinates: Any, radius: Any
+) -> list[dict[str, Any]]:
+    kind = str(feature or "").strip().lower()
+    points = load_coordinate_list(coordinates)
+    if not points:
+        return []
+    if kind == "point":
+        return [{"type": "point", "coords": points}]
+    if kind == "circle":
+        try:
+            radius_nm = float(str(radius).strip())
+        except (TypeError, ValueError):
+            radius_nm = 0.0
+        return [{"type": "circle", "coords": [points[0]], "radius_nm": radius_nm}]
+    if kind == "arc":
+        return [{"type": "line", "coords": points}]
+    return [{"type": "polygon", "coords": points}]
 
 
 def detect_cancellation(message: str) -> tuple[bool, str | None]:
@@ -241,45 +194,101 @@ def detect_cancellation(message: str) -> tuple[bool, str | None]:
 def first_str(raw: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     for k in keys:
         v = raw.get(k)
-        if v is not None and str(v).strip():
-            return str(v).strip()
+        if v is None:
+            continue
+        text = str(v).strip()
+        if text and text != "-":
+            return text
     return None
 
 
-def transform_notice(raw: dict[str, Any]) -> dict[str, Any]:
-    identifier = raw.get("identifier") or raw.get("id") or raw.get("warning_id") or "unknown"
-    year = raw.get("year") or raw.get("notice_year")
-    notice = raw.get("notice") or raw.get("notice_number") or raw.get("number")
-    message = raw.get("message") or raw.get("text") or raw.get("body") or ""
-    geometry = raw.get("geometry") or raw.get("geom") or raw.get("spatial")
+def normalize_identifier(identifier: str) -> str:
+    if "/" in identifier:
+        number, year = identifier.split("/", 1)
+        if len(year) == 2 and year.isdigit():
+            year = f"20{year}"
+        return f"{number}-{year}"
+    return identifier
+
+
+def group_notices(notices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for notice in notices:
+        identifier = str(notice.get("identifier") or "unknown").strip()
+        if identifier not in grouped:
+            grouped[identifier] = []
+            order.append(identifier)
+        grouped[identifier].append(notice)
+
+    merged: list[dict[str, Any]] = []
+    for identifier in order:
+        items = grouped[identifier]
+        if len(items) == 1:
+            merged.append(items[0])
+            continue
+        base = dict(items[0])
+        spatial: list[dict[str, Any]] = []
+        for item in items:
+            spatial.extend(
+                parse_nho_geometry(
+                    item.get("feature"), item.get("coordinates"), item.get("radius")
+                )
+            )
+        dtgs = [str(i.get("dtg")) for i in items if i.get("dtg")]
+        if dtgs:
+            base["dtg"] = max(dtgs)
+        base["_spatial"] = spatial
+        merged.append(base)
+    return merged
+
+
+def transform_notice(
+    raw: dict[str, Any], spatial_override: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    identifier = str(raw.get("identifier") or "unknown").strip()
+    warning_id = normalize_identifier(identifier)
+    notice_type = first_str(raw, ("types", "type"))
+    place = first_str(raw, ("place", "location"))
+    general_area = first_str(raw, ("general_area", "region"))
+    message = str(raw.get("message") or raw.get("text") or "")
     dtg = first_str(raw, ("dtg", "date_time_group", "dateTimeGroup", "date_group"))
     b_char = first_str(raw, ("b_char", "bChar", "broadcast_char", "bch"))
+    status = first_str(raw, ("status", "state"))
 
-    spatial = normalize_geometry(geometry)
-    is_cancelled, cancellation_text = detect_cancellation(str(message))
-
-    if year and notice:
-        warning_id = f"{identifier}-{year}-{notice}"
+    if spatial_override is not None:
+        spatial = spatial_override
     else:
-        warning_id = str(identifier)
+        spatial = parse_nho_geometry(
+            raw.get("feature"), raw.get("coordinates"), raw.get("radius")
+        )
+
+    is_cancelled = bool(status) and status.lower() != "active"
+    cancellation_text = None
+    if is_cancelled:
+        _, cancellation_text = detect_cancellation(message)
 
     evidence_trail: list[dict[str, str]] = []
     if dtg:
         evidence_trail.append({"rule": "nho_json:dtg", "match": dtg[:200]})
     if b_char:
         evidence_trail.append({"rule": "nho_json:b_char", "match": b_char[:200]})
+    if place:
+        evidence_trail.append({"rule": "nho_json:place", "match": place[:200]})
 
-    base_title = f"NAVAREA VIII {identifier}" if str(identifier) else "NAVAREA VIII"
-    suffix = " · ".join(p for p in (dtg, b_char) if p)
-    title = f"{base_title} · {suffix}" if suffix else base_title
+    parts = [f"NAVAREA VIII {identifier}"]
+    for suffix in (notice_type, place, general_area, dtg):
+        if suffix:
+            parts.append(suffix)
+    title = " | ".join(parts)
 
     now = datetime.now(timezone.utc).isoformat()
     return {
         "warning_id": warning_id,
         "source_id": SOURCE_ID,
         "title": title,
-        "raw_text": str(message),
-        "checksum": checksum_text(str(message)),
+        "raw_text": message,
+        "checksum": checksum_text(message),
         "revision": 1,
         "previous_checksum": None,
         "spatial": spatial,
@@ -298,12 +307,15 @@ def transform_notice(raw: dict[str, Any]) -> dict[str, Any]:
 
 def extract_notices(data: Any) -> list[dict[str, Any]]:
     if isinstance(data, list):
-        return data
+        for wrapper in data:
+            if isinstance(wrapper, dict) and isinstance(wrapper.get("NavArea"), list):
+                return [n for n in wrapper["NavArea"] if isinstance(n, dict)]
+        return [n for n in data if isinstance(n, dict)]
     if isinstance(data, dict):
-        for key in ("notices", "data", "items", "warnings", "features", "results"):
+        for key in ("NavArea", "notices", "data", "items", "warnings", "features", "results"):
             val = data.get(key)
             if isinstance(val, list):
-                return val
+                return [n for n in val if isinstance(n, dict)]
     return []
 
 
@@ -414,9 +426,8 @@ def run_scrape() -> None:
     session = requests.Session()
     session.headers.update({"User-Agent": "navarea-nho-scraper/1.0"})
 
-    client_id, client_secret = fetch_credentials(session)
-    access_token = fetch_oauth_token(session, client_id, client_secret)
-    data = fetch_combined_data(session, access_token)
+    auth_headers = resolve_auth_headers(session)
+    data = fetch_combined_data(session, auth_headers)
     notices = extract_notices(data)
 
     if not notices:
@@ -424,7 +435,10 @@ def run_scrape() -> None:
 
     log.info("Fetched %d notice(s) from NHO portal", len(notices))
 
-    records = [transform_notice(n) for n in notices]
+    records = [
+        transform_notice(notice, notice.get("_spatial"))
+        for notice in group_notices(notices)
+    ]
     seen_ids = [r["warning_id"] for r in records]
 
     batch_size = 50

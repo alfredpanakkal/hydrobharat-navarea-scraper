@@ -9,12 +9,12 @@ Full-stack maritime navigational warning tracker with **dual backend** scrapers 
 | Scraper | Entry | Source ID | Auth | Schedule |
 |---------|-------|-----------|------|----------|
 | Node.js/TypeScript | `src/server.ts` (`npm start`) | `hydrobharat-gov-in` | Liferay Basic auth (`LIFERAY_USER`/`LIFERAY_PASS`) | daily 06:00 UTC |
-| Python | `nho_fetch.py` | `nho-portal` | OAuth2 client credentials (`NHO_CLIENT_ID`/`NHO_CLIENT_SECRET`), auto-discovered from JS bundles or env | every 6 hours |
+| Python | `nho_fetch.py` | `nho-portal` | HTTP Basic (`LIFERAY_USER`/`LIFERAY_PASS`, primary) or OAuth2 client credentials (`NHO_CLIENT_ID`/`NHO_CLIENT_SECRET`) | every 6 hours |
 
 Both upsert into the **`nav_warnings`** table with conflict key **`(source_id, warning_id)`** and mark records no longer present as `is_cancelled: true`.
 
 - Node.js pipeline: Liferay headless delivery API → PDF download → `pdf-parse` → **`parseMulti`** (splits the full "warnings in force" list into per-warning segments at `NAVAREA VIII -NNN/YY` headers, then parses each) → LLM (Mistral/Gemini) fallback for hard cases → batch upsert.
-- Python pipeline: NHO `nho-headless/map/combined` JSON → transform (incl. `dtg`/`b_char` fields) → batch upsert.
+- Python pipeline: NHO `nho-headless/map/combined` JSON (list of `{NavArea:[...]}` wrappers) → `group_notices` (entries sharing an `identifier` are one multi-area warning; their shapes merge into a single row's `spatial` array) → transform (nautical `deg,min` coordinate strings → decimal degrees; `status != Active` → `is_cancelled`) → batch upsert.
 
 ### Frontend — Next.js 16 App Router (`dashboard/`)
 

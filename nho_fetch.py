@@ -20,6 +20,9 @@ NHO_TOKEN_URL = f"{NHO_BASE}/o/oauth2/token"
 LIFERAY_API_BASE = f"{NHO_BASE}/o/headless-delivery/v1.0"
 LIFERAY_TEST_PATH = "/document-folders/288109/documents?page=1&pageSize=1"
 SOURCE_ID = "nho-portal"
+# Mirror of NHO NAVAREA VIII bulletins (free full-content page), used as a
+# fallback when the NHO portal credentials are unavailable or rejected.
+MIRROR_URL = "https://www.sealagom.com/navarea/8/"
 
 
 def require_env(key: str) -> str:
@@ -116,6 +119,71 @@ def fetch_combined_data(
         return resp.json()
     except ValueError:
         raise SystemExit(f"Unexpected non-JSON response from {NHO_MAP_URL}")
+
+
+def fetch_from_mirror() -> list[dict[str, Any]]:
+    """
+    Fallback source: SeaLagom mirror of the official NHO NAVAREA VIII bulletins.
+    Returns a list of notice dicts shaped like the NHO JSON records so the
+    downstream transform_notice/group_notices pipeline works unchanged.
+    """
+    log.info("Falling back to mirror: %s", MIRROR_URL)
+    resp = requests.get(
+        MIRROR_URL,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+
+    text = resp.text
+    text = re.sub(r"<script.*?</script>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<style.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "\n", text)
+    text = text.replace("&nbsp;", " ").replace("&amp;", "&")
+    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+    text = text.replace("&#39;", "'")
+    text = re.sub(r"[ \t]+", " ", text)
+
+    # Split on each warning header: "NAVAREA VIII -1028/26" / "NAVAREA VIII -161/23"
+    parts = re.split(r"(?=NAVAREA\s+VIII\s*-\d{3,4}/\d{2})", text)
+    notices: list[dict[str, Any]] = []
+    header_re = re.compile(r"NAVAREA\s+VIII\s*-(\d{3,4}/\d{2})\s*(.*)", re.IGNORECASE)
+    for part in parts:
+        part = part.strip()
+        m = header_re.match(part)
+        if not m:
+            continue
+        identifier = m.group(1)
+        message = part[m.start(2):].strip()
+        # Trim trailing page chrome: cut at blank-line boundaries near nav text end
+        message = message.split("\n\n")[0].strip() or message
+        # Place: first segment of the body up to "(.)" or first period block
+        place_m = re.match(r"([A-Z][A-Z0-9 ,.\-()]*?)(?:\s*\(\.\)|\.)", message)
+        place = place_m.group(1).strip() if place_m else None
+        notices.append(
+            {
+                "identifier": identifier,
+                "message": message,
+                "place": place,
+                "status": "active",
+                "dtg": None,
+                "b_char": None,
+                "types": None,
+                "general_area": None,
+            }
+        )
+
+    if not notices:
+        raise SystemExit(
+            f"Mirror page fetched but no NAVAREA VIII bulletins extracted from {MIRROR_URL}"
+        )
+    log.info("Mirror yielded %d notice(s)", len(notices))
+    return notices
 
 
 def checksum_text(text: str) -> str:
@@ -412,11 +480,6 @@ def try_post_token(
         return None
 
 
-def basic_auth_header(user: str, password: str) -> str:
-    token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
-    return f"Basic {token}"
-
-
 def run_scrape() -> None:
     supabase_url = require_env("SUPABASE_URL")
     supabase_key = require_supabase_key()
@@ -425,14 +488,33 @@ def run_scrape() -> None:
     session = requests.Session()
     session.headers.update({"User-Agent": "navarea-nho-scraper/1.0"})
 
-    auth_headers = resolve_auth_headers(session)
-    data = fetch_combined_data(session, auth_headers)
-    notices = extract_notices(data)
+    # Stage 1: primary source (NHO portal, requires credentials)
+    notices: list[dict[str, Any]] = []
+    try:
+        auth_headers = resolve_auth_headers(session)
+        data = fetch_combined_data(session, auth_headers)
+        notices = extract_notices(data)
+        if notices:
+            log.info("Fetched %d notice(s) from NHO portal", len(notices))
+        else:
+            log.warning(
+                "NHO portal returned no notices (keys: %s)",
+                list(data.keys()) if isinstance(data, dict) else type(data),
+            )
+    except SystemExit as e:
+        log.warning("NHO portal unavailable: %s", e)
+
+    # Stage 2: mirror fallback (anonymous)
+    if not notices:
+        try:
+            notices = fetch_from_mirror()
+        except Exception as e:
+            log.error("Mirror also unavailable: %s", e)
 
     if not notices:
-        log.warning("No notices found in NHO response (keys: %s)", list(data.keys()) if isinstance(data, dict) else type(data))
-
-    log.info("Fetched %d notice(s) from NHO portal", len(notices))
+        raise SystemExit(
+            "All sources failed: no NHO credentials and mirror fetch failed."
+        )
 
     records = [
         transform_notice(notice, notice.get("_spatial"))

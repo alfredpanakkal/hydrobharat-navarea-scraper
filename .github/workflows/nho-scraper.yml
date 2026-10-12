@@ -66,3 +66,20 @@ jobs:
           NHO_CLIENT_SECRET: ${{ secrets.NHO_CLIENT_SECRET }}
         run: |
           python nho_fetch.py
+
+      - name: Archive stale warnings
+        if: ${{ github.event_name != 'workflow_dispatch' || !inputs.probe }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          npm ci
+          npm run cleanup -- --execute
+
+      - name: Upload debug artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-debug
+          path: recon/
+          if-no-files-found: ignore

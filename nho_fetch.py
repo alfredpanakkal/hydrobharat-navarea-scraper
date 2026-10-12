@@ -16,13 +16,16 @@ log = logging.getLogger("nho_fetch")
 
 NHO_BASE = "https://hydrobharat.gov.in"
 NHO_MAP_URL = f"{NHO_BASE}/o/nho-headless/map/combined"
+NHO_PUBLIC_URL = f"{NHO_BASE}/navarea-warnings"
 NHO_TOKEN_URL = f"{NHO_BASE}/o/oauth2/token"
-LIFERAY_API_BASE = f"{NHO_BASE}/o/headless-delivery/v1.0"
-LIFERAY_TEST_PATH = "/document-folders/288109/documents?page=1&pageSize=1"
 SOURCE_ID = "nho-portal"
-# Mirror of NHO NAVAREA VIII bulletins (free full-content page), used as a
-# fallback when the NHO portal credentials are unavailable or rejected.
+# Last-resort mirror of NHO NAVAREA VIII bulletins (anonymous, free).
 MIRROR_URL = "https://www.sealagom.com/navarea/8/"
+
+BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 def require_env(key: str) -> str:
@@ -32,114 +35,112 @@ def require_env(key: str) -> str:
     return v
 
 
-def require_supabase_key() -> str:
-    v = os.environ.get("SUPABASE_KEY")
-    if not v:
-        raise SystemExit("Missing env var: SUPABASE_KEY")
-    return v
-
-
 def basic_auth_header(user: str, password: str) -> str:
     token = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
     return f"Basic {token}"
 
 
-def resolve_auth_headers(session: requests.Session) -> dict[str, str]:
+def _stealthy_fetch(url: str, extra_headers: dict[str, str] | None = None) -> str | None:
+    """
+    Fetch a URL with Scrapling's StealthyFetcher (Camoufox headless browser).
+    Returns page text on success, None if scrapling is unavailable or the
+    fetch fails. Import is lazy so the mirror tier still works in
+    environments where the browser engine was not installed.
+    """
+    try:
+        from scrapling.fetchers import StealthyFetcher
+    except ImportError:
+        log.warning("scrapling not installed; skipping stealthy fetch of %s", url)
+        return None
+    try:
+        page = StealthyFetcher.fetch(
+            url,
+            headless=True,
+            network_idle=True,
+            stealthy_headers=True,
+            extra_headers=extra_headers or None,
+            timeout=90,
+        )
+    except Exception as e:  # scrapling raises varied browser errors
+        log.warning("StealthyFetcher failed for %s: %s", url, e)
+        return None
+    if page.status >= 400:
+        log.warning("StealthyFetcher got HTTP %s for %s", page.status, url)
+        return None
+    return page.get_all_text() if hasattr(page, "get_all_text") else str(page.body)
+
+
+# ----------------------------------------------------------------------------
+# Tier 1: NHO portal JSON endpoint (needs credentials; stealthy first)
+# ----------------------------------------------------------------------------
+
+def _portal_headers(session: requests.Session) -> dict[str, str]:
     user = os.environ.get("LIFERAY_USER")
     password = os.environ.get("LIFERAY_PASS")
     if user and password:
-        log.info("Using HTTP Basic auth (LIFERAY_USER / LIFERAY_PASS)")
         return {"Authorization": basic_auth_header(user, password)}
-
     client_id = os.environ.get("NHO_CLIENT_ID")
     client_secret = os.environ.get("NHO_CLIENT_SECRET")
     if client_id and client_secret:
-        token = fetch_oauth_token(session, client_id, client_secret)
-        return {"Authorization": f"Bearer {token}"}
-
-    raise SystemExit(
-        "No NHO credentials configured. Set LIFERAY_USER/LIFERAY_PASS "
-        "(HTTP Basic, preferred) or NHO_CLIENT_ID/NHO_CLIENT_SECRET "
-        "(OAuth2 client_credentials) and re-run."
-    )
-
-
-def fetch_oauth_token(
-    session: requests.Session, client_id: str, client_secret: str
-) -> str:
-    log.info("Requesting OAuth2 access token (client_credentials)...")
-    try:
-        resp = session.post(
-            NHO_TOKEN_URL,
-            data={
-                "grant_type": "client_credentials",
-                "client_id": client_id,
-                "client_secret": client_secret,
-            },
-            headers={"Accept": "application/json"},
-            timeout=30,
-        )
-    except requests.RequestException as e:
-        raise SystemExit(f"OAuth2 token request failed: {e}")
-    if resp.status_code >= 400:
-        raise SystemExit(
-            f"OAuth2 token endpoint returned HTTP {resp.status_code}: "
-            f"{resp.text[:200]}"
-        )
-    try:
-        payload = resp.json()
-    except ValueError:
-        raise SystemExit("Unexpected non-JSON response from OAuth2 token endpoint")
-    token = payload.get("access_token")
-    if not token:
-        raise SystemExit(
-            f"OAuth2 token response missing access_token (keys: {list(payload.keys())})"
-        )
-    log.info("OAuth2 access token acquired")
-    return token
+        try:
+            resp = session.post(
+                NHO_TOKEN_URL,
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                },
+                headers={"Accept": "application/json"},
+                timeout=30,
+            )
+            token = resp.json().get("access_token")
+            if resp.status_code < 400 and token:
+                return {"Authorization": f"Bearer {token}"}
+            log.warning("OAuth token request failed: HTTP %s", resp.status_code)
+        except Exception as e:
+            log.warning("OAuth token request error: %s", e)
+    return {}
 
 
-def fetch_combined_data(
-    session: requests.Session, auth_headers: dict[str, str]
-) -> Any:
-    try:
-        resp = session.get(
-            NHO_MAP_URL,
-            headers={**auth_headers, "Accept": "application/json"},
-            timeout=60,
-        )
-    except requests.RequestException as e:
-        raise SystemExit(f"GET {NHO_MAP_URL} failed: {e}")
-    if resp.status_code >= 400:
-        raise SystemExit(
-            f"NHO endpoint returned HTTP {resp.status_code} for {NHO_MAP_URL}: "
-            f"{resp.text[:200]}"
-        )
-    try:
-        return resp.json()
-    except ValueError:
-        raise SystemExit(f"Unexpected non-JSON response from {NHO_MAP_URL}")
+def fetch_tier1_portal() -> list[dict[str, Any]]:
+    """NHO portal /o/nho-headless/map/combined — official structured JSON."""
+    auth = _portal_headers(requests.Session())
+    headers = {**auth, "Accept": "application/json"}
+    if auth:
+        try:
+            resp = requests.get(NHO_MAP_URL, headers=headers, timeout=60)
+            if resp.status_code == 200:
+                data = resp.json()
+                notices = extract_notices(data)
+                if notices:
+                    log.info("Tier 1 (portal, requests) yielded %d notice(s)", len(notices))
+                    return notices
+            log.info("Tier 1 requests attempt: HTTP %s", resp.status_code)
+        except Exception as e:
+            log.info("Tier 1 requests attempt failed: %s", e)
+
+    # Stealthy browser attempt (bypasses edge denial; JSON arrives as page text)
+    text = _stealthy_fetch(NHO_MAP_URL, extra_headers={"Accept": "application/json"})
+    if text:
+        try:
+            data = json.loads(text)
+            notices = extract_notices(data)
+            if notices:
+                log.info("Tier 1 (portal, StealthyFetcher) yielded %d notice(s)", len(notices))
+                return notices
+        except (ValueError, TypeError):
+            log.info("Tier 1 stealthy response was not JSON")
+    return []
 
 
-def fetch_from_mirror() -> list[dict[str, Any]]:
-    """
-    Fallback source: SeaLagom mirror of the official NHO NAVAREA VIII bulletins.
-    Returns a list of notice dicts shaped like the NHO JSON records so the
-    downstream transform_notice/group_notices pipeline works unchanged.
-    """
-    log.info("Falling back to mirror: %s", MIRROR_URL)
-    resp = requests.get(
-        MIRROR_URL,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
+# ----------------------------------------------------------------------------
+# Tier 2: NHO public warnings page (anonymous HTML, adaptive selectors)
+# ----------------------------------------------------------------------------
 
-    text = resp.text
+WARNING_HEADER_RE = re.compile(r"NAVAREA\s+VIII\s*-\s*(\d{3,4}/\d{2})", re.IGNORECASE)
+
+
+def _clean_html_text(text: str) -> str:
     text = re.sub(r"<script.*?</script>", " ", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<style.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
@@ -147,29 +148,29 @@ def fetch_from_mirror() -> list[dict[str, Any]]:
     text = text.replace("&nbsp;", " ").replace("&amp;", "&")
     text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
     text = text.replace("&#39;", "'")
-    text = re.sub(r"[ \t]+", " ", text)
+    return text
 
-    # Split on each warning header: "NAVAREA VIII -1028/26" / "NAVAREA VIII -161/23"
-    parts = re.split(r"(?=NAVAREA\s+VIII\s*-\d{3,4}/\d{2})", text)
+
+def _parse_mirror_style_text(text: str, source_label: str) -> list[dict[str, Any]]:
+    """Extract NAVAREA VIII notices from plain text; shared by tiers 2 and 3."""
+    text = _clean_html_text(text)
     notices: list[dict[str, Any]] = []
-    header_re = re.compile(r"NAVAREA\s+VIII\s*-(\d{3,4}/\d{2})\s*(.*)", re.IGNORECASE)
+    parts = re.split(r"(?=NAVAREA\s+VIII\s*-\s*\d{3,4}/\d{2})", text)
     for part in parts:
-        part = part.strip()
-        m = header_re.match(part)
+        m = re.match(
+            r"NAVAREA\s+VIII\s*-\s*(\d{3,4}/\d{2})\s*(.*)", part.strip(), re.IGNORECASE
+        )
         if not m:
             continue
         identifier = m.group(1)
-        message = part[m.start(2):].strip()
-        # Trim trailing page chrome: cut at blank-line boundaries near nav text end
+        message = part.strip()[m.end(1):].strip()
         message = message.split("\n\n")[0].strip() or message
-        # Place: first segment of the body up to "(.)" or first period block
         place_m = re.match(r"([A-Z][A-Z0-9 ,.\-()]*?)(?:\s*\(\.\)|\.)", message)
-        place = place_m.group(1).strip() if place_m else None
         notices.append(
             {
                 "identifier": identifier,
                 "message": message,
-                "place": place,
+                "place": place_m.group(1).strip() if place_m else None,
                 "status": "active",
                 "dtg": None,
                 "b_char": None,
@@ -177,14 +178,42 @@ def fetch_from_mirror() -> list[dict[str, Any]]:
                 "general_area": None,
             }
         )
-
-    if not notices:
-        raise SystemExit(
-            f"Mirror page fetched but no NAVAREA VIII bulletins extracted from {MIRROR_URL}"
-        )
-    log.info("Mirror yielded %d notice(s)", len(notices))
+    if notices:
+        log.info("%s yielded %d notice(s)", source_label, len(notices))
     return notices
 
+
+def fetch_tier2_public_page() -> list[dict[str, Any]]:
+    """NHO public /navarea-warnings page via StealthyFetcher."""
+    text = _stealthy_fetch(NHO_PUBLIC_URL)
+    if not text:
+        return []
+    notices = _parse_mirror_style_text(text, "Tier 2 (NHO public page, StealthyFetcher)")
+    return notices
+
+
+def fetch_tier3_mirror() -> list[dict[str, Any]]:
+    """SeaLagom NAVAREA VIII mirror — anonymous requests fetch."""
+    try:
+        resp = requests.get(
+            MIRROR_URL,
+            headers={
+                "User-Agent": BROWSER_UA,
+                "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        log.warning("Tier 3 mirror fetch failed: %s", e)
+        return []
+    return _parse_mirror_style_text(resp.text, "Tier 3 (SeaLagom mirror)")
+
+
+# ----------------------------------------------------------------------------
+# Shared transforms (unchanged from previous version)
+# ----------------------------------------------------------------------------
 
 def checksum_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -220,17 +249,13 @@ def load_coordinate_list(raw: Any) -> list[dict[str, Any]]:
         if not isinstance(entry, dict):
             continue
         lat = parse_nho_coordinate(entry.get("lat"))
-        lon = parse_nho_coordinate(
-            entry.get("long") or entry.get("lon") or entry.get("lng")
-        )
+        lon = parse_nho_coordinate(entry.get("long") or entry.get("lon") or entry.get("lng"))
         if lat is not None and lon is not None:
             points.append({"lat": lat, "lon": lon})
     return points
 
 
-def parse_nho_geometry(
-    feature: Any, coordinates: Any, radius: Any
-) -> list[dict[str, Any]]:
+def parse_nho_geometry(feature: Any, coordinates: Any, radius: Any) -> list[dict[str, Any]]:
     kind = str(feature or "").strip().lower()
     points = load_coordinate_list(coordinates)
     if not points:
@@ -386,136 +411,49 @@ def extract_notices(data: Any) -> list[dict[str, Any]]:
     return []
 
 
-def run_probe() -> None:
-    log.info("Probe mode: testing auth options for %s", NHO_MAP_URL)
-    session = requests.Session()
-    session.headers.update({"User-Agent": "navarea-nho-scraper/1.0"})
+# ----------------------------------------------------------------------------
+# Orchestration
+# ----------------------------------------------------------------------------
 
-    results: list[tuple[str, requests.Response | None]] = []
-
-    resp = try_get(session, NHO_MAP_URL)
-    results.append(("anonymous GET nho-headless/map/combined", resp))
-
-    user = os.environ.get("LIFERAY_USER")
-    password = os.environ.get("LIFERAY_PASS")
-    if user and password:
-        auth = basic_auth_header(user, password)
-        resp = try_get(session, NHO_MAP_URL, {"Authorization": auth})
-        results.append(("Basic LIFERAY_* on nho-headless/map/combined", resp))
-        resp = try_get(
-            session,
-            LIFERAY_API_BASE + LIFERAY_TEST_PATH,
-            {"Authorization": auth, "Accept": "application/json"},
-        )
-        results.append(("Basic LIFERAY_* on headless-delivery control", resp))
-    else:
-        log.info("LIFERAY_USER/LIFERAY_PASS not set; skipping Basic probes")
-
-    client_id = os.environ.get("NHO_CLIENT_ID")
-    client_secret = os.environ.get("NHO_CLIENT_SECRET")
-    if client_id and client_secret:
-        resp = try_post_token(session, client_id, client_secret)
-        results.append(("OAuth client_credentials via NHO_* secrets", resp))
-    else:
-        log.info("NHO_CLIENT_ID/NHO_CLIENT_SECRET not set; skipping OAuth probe")
-
-    log.info("---- auth probe results ----")
-    working_auth: dict[str, str] | None = None
-    for label, resp in results:
-        if resp is None:
-            log.info("%-48s -> network error", label)
+def collect_notices() -> tuple[list[dict[str, Any]], str]:
+    tiers = (
+        ("portal", fetch_tier1_portal),
+        ("nho-public-page", fetch_tier2_public_page),
+        ("sealagom-mirror", fetch_tier3_mirror),
+    )
+    for name, fn in tiers:
+        try:
+            notices = fn()
+        except Exception as e:
+            log.warning("Tier '%s' raised: %s", name, e)
             continue
-        snippet = (resp.text or "")[:160].replace("\n", " ").strip()
-        log.info("%-48s -> HTTP %s | %s", label, resp.status_code, snippet)
-        if resp.status_code == 200 and "LIFERAY" in label:
-            working_auth = {"Authorization": basic_auth_header(user, password)}
-
-    if working_auth:
-        dump_raw_response(session, working_auth)
+        if notices:
+            return notices, name
+        log.info("Tier '%s' returned no notices; trying next", name)
+    raise SystemExit("All three tiers failed: portal, NHO public page, and mirror.")
 
 
-def dump_raw_response(
-    session: requests.Session, headers: dict[str, str]
-) -> None:
-    resp = try_get(session, NHO_MAP_URL, headers)
-    if resp is None:
-        log.error("Re-fetch for raw dump failed")
-        return
-    log.info("Raw response: HTTP %s, %d bytes", resp.status_code, len(resp.content))
-    out_dir = os.path.join(os.getcwd(), "recon")
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "nho-combined.json")
-    with open(out_path, "w", encoding="utf-8") as fh:
-        fh.write(resp.text)
-    log.info("Wrote raw response to %s", out_path)
-    log.info("Head: %s", resp.text[:500])
-
-
-def try_get(
-    session: requests.Session, url: str, headers: dict[str, str] | None = None
-) -> requests.Response | None:
-    try:
-        return session.get(url, headers=headers or {}, timeout=30)
-    except requests.RequestException as e:
-        log.error("GET %s failed: %s", url, e)
-        return None
-
-
-def try_post_token(
-    session: requests.Session, client_id: str, client_secret: str
-) -> requests.Response | None:
-    try:
-        return session.post(
-            NHO_TOKEN_URL,
-            data={
-                "grant_type": "client_credentials",
-                "client_id": client_id,
-                "client_secret": client_secret,
-            },
-            headers={"Accept": "application/json"},
-            timeout=30,
-        )
-    except requests.RequestException as e:
-        log.error("POST %s failed: %s", NHO_TOKEN_URL, e)
-        return None
+def run_probe() -> None:
+    log.info("Probe mode: testing all fetch tiers (no data write)")
+    for name, fn in (
+        ("portal", fetch_tier1_portal),
+        ("nho-public-page", fetch_tier2_public_page),
+        ("sealagom-mirror", fetch_tier3_mirror),
+    ):
+        try:
+            notices = fn()
+            log.info("[probe] %-18s -> %d notice(s)", name, len(notices))
+        except Exception as e:
+            log.info("[probe] %-18s -> ERROR: %s", name, e)
 
 
 def run_scrape() -> None:
     supabase_url = require_env("SUPABASE_URL")
-    supabase_key = require_supabase_key()
+    supabase_key = require_env("SUPABASE_KEY")
+    notices, tier = collect_notices()
+    log.info("Proceeding with %d notice(s) from tier '%s'", len(notices), tier)
+
     supabase: Client = create_client(supabase_url, supabase_key)
-
-    session = requests.Session()
-    session.headers.update({"User-Agent": "navarea-nho-scraper/1.0"})
-
-    # Stage 1: primary source (NHO portal, requires credentials)
-    notices: list[dict[str, Any]] = []
-    try:
-        auth_headers = resolve_auth_headers(session)
-        data = fetch_combined_data(session, auth_headers)
-        notices = extract_notices(data)
-        if notices:
-            log.info("Fetched %d notice(s) from NHO portal", len(notices))
-        else:
-            log.warning(
-                "NHO portal returned no notices (keys: %s)",
-                list(data.keys()) if isinstance(data, dict) else type(data),
-            )
-    except SystemExit as e:
-        log.warning("NHO portal unavailable: %s", e)
-
-    # Stage 2: mirror fallback (anonymous)
-    if not notices:
-        try:
-            notices = fetch_from_mirror()
-        except Exception as e:
-            log.error("Mirror also unavailable: %s", e)
-
-    if not notices:
-        raise SystemExit(
-            "All sources failed: no NHO credentials and mirror fetch failed."
-        )
-
     records = [
         transform_notice(notice, notice.get("_spatial"))
         for notice in group_notices(notices)
